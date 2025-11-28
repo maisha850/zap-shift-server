@@ -70,6 +70,7 @@ async function run() {
    const paymentCollection = db.collection('payments');
    const userCollection = db.collection('users');
    const riderCollection = db.collection('riders');
+   const trackingCollection = db.collection('trackings');
    const verifyAdminToken=async(req ,res, next)=>{
   const email = req.decoded_email
   const query = {email}
@@ -79,7 +80,16 @@ async function run() {
   }
   next()
 }
-
+const logTrackings=async(trackingId , status)=>{
+  const logInfo={
+    trackingId,
+    status,
+    details: status.split('-').join(' '),
+    created_at: new Date()
+  }
+  const result = await trackingCollection.insertOne(logInfo)
+  return result
+}
 
   //  user
   app.get('/users' , verifyFBToken , async(req , res)=>{
@@ -174,6 +184,44 @@ $set:{
   res.send(result)
 })
   //  parcel
+  app.get('/parcels/rider' , async(req , res)=>{
+    const {riderEmail , deliveryStatus}=req.query
+    const query = {}
+    if(riderEmail){
+      query.riderEmail = riderEmail
+    }
+    if(deliveryStatus !== 'parcel_delivered'){
+      query.deliveryStatus = {$nin : ['parcel_delivered']}
+    }
+    else{
+      query.deliveryStatus= deliveryStatus
+    }
+    const result = await parcelCollection.find(query).toArray()
+    res.send(result)
+  })
+  app.patch('/parcels/:id/status' , async(req, res)=>{
+    const{deliveryStatus , riderId , trackingId}=req.body
+    const id = req.params.id
+      const query = {_id : new ObjectId(id)}
+      const update = {
+        $set:{
+          deliveryStatus: deliveryStatus
+        }
+      }
+    if (deliveryStatus === 'parcel_delivered') {
+                // update rider information
+                const riderQuery = { _id: new ObjectId(riderId) }
+                const riderUpdatedDoc = {
+                    $set: {
+                        workStatus: 'available'
+                    }
+                }
+                const resultRider = await riderCollection.updateOne(riderQuery , riderUpdatedDoc)
+              }
+      const result = await parcelCollection.updateOne(query , update)
+      logTrackings(trackingId , deliveryStatus)
+      res.send(result)
+  })
     app.get('/parcels' , async(req , res)=>{
         const query = {}
    const {email , deliveryStatus} = req.query
@@ -197,7 +245,11 @@ res.send(result)
    
     app.post('/parcels' , async(req , res)=>{
         const parcels = req.body
+        const trackingId = generateTrackingId()
         parcels.created_at = new Date()
+        parcels.trackingId = trackingId
+        logTrackings(trackingId , 'parcel_created')
+        
         console.log(parcels)
         const result = await parcelCollection.insertOne(parcels)
         res.send(result)
@@ -208,29 +260,31 @@ res.send(result)
       const result = await parcelCollection.deleteOne(query)
       res.send(result)
     })
-//     app.patch('/parcels/:id' , async(req ,res)=>{
-//       const {riderId , riderName , riderEmail}=req.body
-//       const id = req.params.id
-//        const query = {_id : new ObjectId(id)}
-//        const update={
-//         $set:{
-//           deliveryStatus: 'driver_assigned',
-//           riderId: riderId,
-//           riderName: riderName,
-//           riderEmail: riderEmail
-//         }
-//        }
-//        const result = await parcelCollection.updateOne(query, update)
-//        const riderQuery = {_id: new ObjectId(riderId)}
-//        const updateRider ={
-//         $set:{
-//           workStatus: 'In_delivery'
-//         }
-//        }
-//        const riderResult = await riderCollection.updateOne(riderQuery , updateRider)
-// res.send(riderResult)
+    app.patch('/parcels/:id' , async(req ,res)=>{
+      const {riderId , riderName , riderEmail , trackingId}=req.body
+      const id = req.params.id
+       const query = {_id : new ObjectId(id)}
+       const update={
+        $set:{
+          deliveryStatus: 'driver_assigned',
+          riderId: riderId,
+          riderName: riderName,
+          riderEmail: riderEmail
+        }
+       }
+       const result = await parcelCollection.updateOne(query, update)
+       const riderQuery = {_id: new ObjectId(riderId)}
+       const updateRider ={
+        $set:{
+          workStatus: 'In_delivery'
+        }
+       }
+       const riderResult = await riderCollection.updateOne(riderQuery , updateRider)
+       logTrackings(trackingId, 'driver_assigned' )
+res.send(riderResult)
 
-//     })
+    })
+    
 
     app.post('/payment-checkout-session', async(req ,res)=>{
       const paymentInfo = req.body
@@ -252,7 +306,8 @@ res.send(result)
   mode: 'payment',
   metadata: {
     parcelId : paymentInfo.parcelId,
-    parcelName : paymentInfo.parcelName
+    parcelName : paymentInfo.parcelName,
+    trackingId: paymentInfo.trackingId
   },
   customer_email : paymentInfo.senderEmail,
   success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
@@ -277,12 +332,17 @@ res.send({url : session.url})
   if(paymentExists){
     return res.send({message: 'already exists' , transactionId , trackingId: paymentExists.trackingId})
   }
-           const trackingId = generateTrackingId();
+           const trackingId = session.metadata.trackingId;
         if (session.payment_status === 'paid') {
           const parcelId = session.metadata.parcelId;
 
             const query = { _id: new ObjectId(parcelId) };
-            const update = { $set: { payment_status: 'paid', deliveryStatus: 'pending-pickup' , trackingId: trackingId } };
+            const update = { $set: 
+              { payment_status: 'paid',
+               deliveryStatus: 'pending-pickup' ,
+                trackingId: trackingId }
+               };
+              
             const result = await parcelCollection.updateOne(query, update);
 
             const payment = {
@@ -298,6 +358,7 @@ res.send({url : session.url})
             };
 
             const resultPayment = await paymentCollection.insertOne(payment);
+             logTrackings(trackingId , 'pending-pickup')
 
             // ✅ Send only one response here
             res.send({
@@ -332,7 +393,13 @@ app.get('/payments' , verifyFBToken,  async(req, res)=>{
   const result = await cursor.toArray()
   res.send(result)
 })
-
+// trackings
+app.get('/trackings/:trackingId/logs', async(req , res)=>{
+  const trackingId = req.params.trackingId
+  const query = {trackingId}
+  const result = await trackingCollection.find(query).toArray()
+  res.send(result)
+})
 
 
   
