@@ -10,6 +10,7 @@ const crypto = require("crypto");
 const admin = require("firebase-admin");
 
 const serviceAccount = require("./zap-shift-firebase-adminsdk.json");
+const { count } = require('console');
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -80,6 +81,15 @@ async function run() {
   }
   next()
 }
+//    const verifyRiderToken=async(req ,res, next)=>{
+//   const email = req.decoded_email
+//   const query = {email}
+//   const user = await userCollection.findOne(query)
+//   if(!user || user.role!=='rider'){
+//     return res.status(403).send({message: 'forbidden access'})
+//   }
+//   next()
+// }
 const logTrackings=async(trackingId , status)=>{
   const logInfo={
     trackingId,
@@ -236,6 +246,72 @@ const cursor = parcelCollection.find(query , options)
 const result = await cursor.toArray()
 res.send(result)
     })
+    app.get('/parcels/delivery-status/status' , async(req , res)=>{
+      const pipeline = [
+        {
+          $group:{
+            _id: '$deliveryStatus',
+            count: {$sum: 1}
+          }
+        },
+        {
+          $project:{
+            status: '$_id',
+            count: 1
+          }
+        }
+      ]
+      const result = await parcelCollection.aggregate(pipeline).toArray()
+      res.send(result)
+    })
+    app.get('/rider/delivery-per-day', async(req,res)=>{
+      const email = req.query.email
+      const pipeline =[
+        {
+          $match:{
+            riderEmail: email,
+            deliveryStatus: "parcel_delivered"
+          }
+          
+        },
+        {
+           $lookup:{
+              from: 'trackings',
+              localField: 'trackingId',
+              foreignField: 'trackingId',
+              as: 'parcel-trackings'
+            }
+        },
+        {
+          $unwind: '$parcel-trackings'
+        },
+        {
+          $match: {
+            "parcel-trackings.status": 'parcel_delivered'
+          }
+        },
+         {
+                    // convert timestamp to YYYY-MM-DD string
+                    $addFields: {
+                        deliveryDay: {
+                            $dateToString: {
+                                format: "%Y-%m-%d",
+                                date: "$parcel_trackings.created_at"
+                            }
+                        }
+                    }
+                },
+                {
+                    // group by date
+                    $group: {
+                        _id: "$deliveryDay",
+                        deliveredCount: { $sum: 1 }
+                    }
+                }
+      ]
+      const result = await parcelCollection.aggregate(pipeline).toArray()
+      res.send(result)
+    })
     app.get('/parcels/:id' , async(req , res)=>{
       const id = req.params.id;
       const query = {_id : new ObjectId(id)}
@@ -361,7 +437,7 @@ res.send({url : session.url})
              logTrackings(trackingId , 'pending-pickup')
 
             // ✅ Send only one response here
-            res.send({
+        return res.send({
                 success: true,
                 modifyParcel: result,
                 paymentInfo: resultPayment,
@@ -371,7 +447,7 @@ res.send({url : session.url})
         }
 
         // Payment not completed
-        res.send({ success: false, message: "Payment not completed yet" });
+        return res.send({ success: false, message: "Payment not completed yet" });
 
     } catch (error) {
         console.error(error);
